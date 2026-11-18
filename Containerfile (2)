@@ -2,9 +2,9 @@ FROM quay.io/sclorg/nodejs-20-c9s:latest
 ENV NPM_CONFIG_CACHE=/tmp/.npm
 WORKDIR /opt/app-root/src
 COPY . .
-RUN mv -f "package (2).json" package.json 2>/dev/null || true && \
-    mkdir -p src && \
-    mv -f server.js src/ 2>/dev/null || true && \
-    npm install --omit=dev --no-audit --no-fund
+RUN mkdir -p src && \
+    mv -f server*.js src/server.js 2>/dev/null || true && \
+    npm init -y && \
+    npm install express cors pg dotenv --no-audit --no-fund
 EXPOSE 8080
 CMD ["node", "src/server.js"]
