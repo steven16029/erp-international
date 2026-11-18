@@ -1,0 +1,22 @@
+# OPCIONAL: solo el backend puede conectarse a PostgreSQL.
+# Aplicar con: oc apply -f openshift/optional/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: erp-postgres-solo-backend
+  labels:
+    app.kubernetes.io/part-of: erp-global
+spec:
+  podSelector:
+    matchLabels:
+      app: erp-postgres-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: erp-backend-api
+      ports:
+        - protocol: TCP
+          port: 5432

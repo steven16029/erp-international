@@ -1,0 +1,18 @@
+# Backend ERP - Red Hat UBI 9 + Node.js 20
+FROM registry.access.redhat.com/ubi9/nodejs-20:latest
+
+ENV NODE_ENV=production
+WORKDIR /opt/app-root/src
+
+# Dependencias primero para aprovechar la caché de capas
+COPY package*.json ./
+RUN npm install --omit=dev && npm cache clean --force
+
+COPY . .
+
+# OpenShift ejecuta con un UID aleatorio del grupo 0; 1001 es el usuario por defecto de la imagen UBI
+USER 1001
+EXPOSE 8080
+
+# node directo (sin npm) para que SIGTERM llegue al proceso y el pod cierre limpio
+CMD ["node", "src/server.js"]
