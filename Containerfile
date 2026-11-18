@@ -4,9 +4,10 @@ WORKDIR /opt/app-root/src
 COPY package*.json ./
 RUN npm install --no-audit --no-fund
 COPY . .
-RUN mkdir -p public src && \
+RUN mkdir -p public src/services && \
     mv -f index.html env-config.js public/ 2>/dev/null || true && \
     mv -f App.jsx index.js App.css index.css src/ 2>/dev/null || true && \
+    mv -f redhatAuth.js src/services/ 2>/dev/null || true && \
     npm run build
 
 FROM quay.io/nginx/nginx-unprivileged:latest
