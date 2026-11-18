@@ -1,390 +1,204 @@
-# ==============================================================================
-# ERP INTERNACIONAL - MANIFIESTO COMPLETO PARA RED HAT OPENSHIFT
-#
-# Flujo de conexiones:
-#   Navegador --HTTPS--> Route erp-v2-route --> Service erp-v2-service --> nginx (frontend)
-#   nginx (/api/*) ---------> Service erp-backend-svc --> Node.js (backend)
-#   Node.js ----------------> Service erp-postgres-svc --> PostgreSQL (PVC)
-#   BuildConfig --> ImageStream --(trigger)--> Deployment
-#
-# - Sin Namespace (compatible con Red Hat Developer Sandbox): se despliega en tu proyecto actual
-# - Sin root: todo corre con UID aleatorio (SCC restricted-v2)
-# - Requiere antes el Secret openshift/00-secret.yaml (o scripts/deploy.sh que lo crea)
-# - Requiere compilar las imágenes: oc start-build erp-backend-api / erp-v2-frontend (ver README)
-# ==============================================================================
-
-# ------------------------------- BASE DE DATOS --------------------------------
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Secret
 metadata:
-  name: erp-postgres-pvc
-  labels:
-    app.kubernetes.io/part-of: erp-global
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
+  name: erp-db-secret
+type: Opaque
+stringData:
+  POSTGRESQL_USER: "erp_admin"
+  POSTGRESQL_PASSWORD: "ErpGlobal2026SecurePassword"
+  POSTGRESQL_DATABASE: "erp_global"
+  DATABASE_URL: "postgresql://erp_admin:ErpGlobal2026SecurePassword@erp-postgres:5432/erp_global"
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: erp-postgres-db
-  labels:
-    app: erp-postgres-db
-    app.kubernetes.io/part-of: erp-global
-    app.openshift.io/runtime: postgresql
-spec:
-  replicas: 1
-  # Recreate: el PVC es ReadWriteOnce, no pueden coexistir dos pods de PostgreSQL sobre el mismo volumen
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: erp-postgres-db
-  template:
-    metadata:
-      labels:
-        app: erp-postgres-db
-    spec:
-      securityContext:
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: postgres
-          # Imagen de Red Hat compatible con UID aleatorio (postgres:alpine NO arranca en OpenShift).
-          # Si no pudiera descargarse, alternativa pública: quay.io/sclorg/postgresql-16-c9s:latest
-          image: registry.access.redhat.com/rhel9/postgresql-16:latest
-          ports:
-            - containerPort: 5432
-          envFrom:
-            - secretRef:
-                name: erp-db-secret
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: ["ALL"]
-          volumeMounts:
-            - name: pg-storage
-              mountPath: /var/lib/pgsql/data
-          readinessProbe:
-            exec:
-              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            tcpSocket:
-              port: 5432
-            initialDelaySeconds: 30
-            periodSeconds: 20
-            timeoutSeconds: 5
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
-      volumes:
-        - name: pg-storage
-          persistentVolumeClaim:
-            claimName: erp-postgres-pvc
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: erp-postgres-svc
-  labels:
-    app.kubernetes.io/part-of: erp-global
-spec:
-  selector:
-    app: erp-postgres-db
-  ports:
-    - name: postgresql
-      port: 5432
-      targetPort: 5432
----
-# --------------------------------- BACKEND ------------------------------------
-apiVersion: image.openshift.io/v1
-kind: ImageStream
-metadata:
-  name: erp-backend-api
-  labels:
-    app.kubernetes.io/part-of: erp-global
-spec:
-  lookupPolicy:
-    local: true   # permite usar "erp-backend-api:latest" como nombre de imagen en el Deployment
----
-apiVersion: build.openshift.io/v1
-kind: BuildConfig
-metadata:
-  name: erp-backend-api
-  labels:
-    app.kubernetes.io/part-of: erp-global
-spec:
-  runPolicy: Serial
-  source:
-    type: Binary
-    binary: {}
-  strategy:
-    type: Docker
-    dockerStrategy:
-      dockerfilePath: Containerfile   # el proyecto usa Containerfile, no Dockerfile
-  output:
-    to:
-      kind: ImageStreamTag
-      name: erp-backend-api:latest
-  resources:
-    limits:
-      cpu: "1"
-      memory: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: erp-backend-api
-  labels:
-    app: erp-backend-api
-    app.kubernetes.io/part-of: erp-global
-    app.openshift.io/runtime: nodejs
-  annotations:
-    # Cuando una build publica una imagen nueva, el Deployment se actualiza solo
-    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"erp-backend-api:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"backend\")].image"}]'
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: erp-backend-api
-  template:
-    metadata:
-      labels:
-        app: erp-backend-api
-    spec:
-      securityContext:
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: backend
-          image: erp-backend-api:latest
-          ports:
-            - name: http
-              containerPort: 8080
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: ["ALL"]
-          env:
-            - name: PORT
-              value: "8080"
-            # CONEXIÓN BACKEND -> POSTGRESQL
-            - name: DB_HOST
-              value: erp-postgres-svc
-            - name: DB_PORT
-              value: "5432"
-            - name: DB_NAME
-              valueFrom:
-                secretKeyRef:
-                  name: erp-db-secret
-                  key: POSTGRESQL_DATABASE
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: erp-db-secret
-                  key: POSTGRESQL_USER
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: erp-db-secret
-                  key: POSTGRESQL_PASSWORD
-            # Red Hat SSO: déjalo en "false" hasta tener un Keycloak real y ajusta URL/realm
-            - name: ENFORCE_RHSSO
-              value: "false"
-            - name: RHSSO_URL
-              value: "https://sso.empresa-global.com/auth"
-            - name: RHSSO_REALM
-              value: "erp-international"
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: http
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 3
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "300m"
-              memory: "256Mi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: erp-backend-svc
-  labels:
-    app.kubernetes.io/part-of: erp-global
-spec:
-  selector:
-    app: erp-backend-api
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-# Nota: el backend NO tiene Route. El navegador entra por el frontend y nginx reenvía /api/* aquí.
-# Para exponerlo (depuración): oc expose service erp-backend-svc
----
-# --------------------------------- FRONTEND -----------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: erp-v2-config
-  labels:
-    app.kubernetes.io/part-of: erp-global
+  name: erp-frontend-config
 data:
   env-config.js: |
     window._env_ = {
-      REACT_APP_RHSSO_URL: "https://sso.empresa-global.com/auth",
+      REACT_APP_RHSSO_URL: "https://empresa-global.com",
       REACT_APP_RHSSO_REALM: "erp-international",
       REACT_APP_RHSSO_CLIENT_ID: "erp-react-web",
-      REACT_APP_3SCALE_API_URL: "/api/v1",
-      REACT_APP_AUTH_ENABLED: "false"
+      REACT_APP_3SCALE_API_URL: "/api/v1"
     };
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  name: erp-v2-frontend
-  labels:
-    app.kubernetes.io/part-of: erp-global
-spec:
-  lookupPolicy:
-    local: true
+  name: erp-frontend
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: erp-backend
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
-  name: erp-v2-frontend
+  name: erp-frontend-build
   labels:
-    app.kubernetes.io/part-of: erp-global
+    app: erp-frontend
 spec:
-  runPolicy: Serial
+  output:
+    to:
+      kind: ImageStreamTag
+      name: erp-frontend:latest
   source:
-    type: Binary
-    binary: {}
+    type: Git
+    git:
+      uri: "steven16029"
+      ref: "main"
+    contextDir: "frontend"
   strategy:
     type: Docker
     dockerStrategy:
       dockerfilePath: Containerfile
+      env:
+        - name: NPM_CONFIG_CACHE
+          value: "/tmp/.npm"
+        - name: CI
+          value: "false"
+  triggers:
+    - type: ConfigChange
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: erp-backend-build
+  labels:
+    app: erp-backend
+spec:
   output:
     to:
       kind: ImageStreamTag
-      name: erp-v2-frontend:latest
-  resources:
-    limits:
-      cpu: "1"
-      memory: 1Gi
+      name: erp-backend:latest
+  source:
+    type: Git
+    git:
+      uri: "steven16029"
+      ref: "main"
+    contextDir: "backend"
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+      env:
+        - name: NPM_CONFIG_CACHE
+          value: "/tmp/.npm"
+  triggers:
+    - type: ConfigChange
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: erp-v2-frontend
+  name: erp-backend
   labels:
-    app: erp-v2-frontend
-    app.kubernetes.io/part-of: erp-global
-    app.openshift.io/runtime: react
-  annotations:
-    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"erp-v2-frontend:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"erp-v2-web\")].image"}]'
+    app: erp-backend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: erp-v2-frontend
+      app: erp-backend
   template:
     metadata:
       labels:
-        app: erp-v2-frontend
+        app: erp-backend
     spec:
-      securityContext:
-        seccompProfile:
-          type: RuntimeDefault
       containers:
-        - name: erp-v2-web
-          image: erp-v2-frontend:latest
+        - name: backend
+          image: erp-backend:latest
           ports:
-            - name: http
-              containerPort: 8080
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: ["ALL"]
-          volumeMounts:
-            # Sobrescribe el env-config.js del build con el del ConfigMap (sin recompilar)
-            - name: config-volume
-              mountPath: /opt/app-root/src/env-config.js
-              subPath: env-config.js
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-            initialDelaySeconds: 3
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 20
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+          envFrom:
+            - secretRef:
+                name: erp-db-secret
           resources:
             requests:
-              cpu: "50m"
-              memory: "64Mi"
+              cpu: "100m"
+              memory: "128Mi"
             limits:
-              cpu: "300m"
+              cpu: "500m"
               memory: "256Mi"
-      volumes:
-        - name: config-volume
-          configMap:
-            name: erp-v2-config
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: erp-v2-service
-  labels:
-    app.kubernetes.io/part-of: erp-global
+  name: erp-backend
 spec:
   selector:
-    app: erp-v2-frontend
+    app: erp-backend
   ports:
-    - name: http
-      port: 8080
+    - port: 8080
       targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: erp-frontend
+  labels:
+    app: erp-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: erp-frontend
+  template:
+    metadata:
+      labels:
+        app: erp-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: erp-frontend:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /usr/share/nginx/html/env-config.js
+              subPath: env-config.js
+      volumes:
+        - name: config-volume
+          configMap:
+            name: erp-frontend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: erp-frontend
+spec:
+  selector:
+    app: erp-frontend
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
 ---
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: erp-v2-route
+  name: erp-web
   labels:
-    app.kubernetes.io/part-of: erp-global
+    app: erp-frontend
 spec:
   to:
     kind: Service
-    name: erp-v2-service
+    name: erp-frontend
+    weight: 100
   port:
-    targetPort: http
+    targetPort: 8080
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
